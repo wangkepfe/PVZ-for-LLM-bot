@@ -35,6 +35,9 @@
 #include "../Sexy.TodLib/TodDebug.h"
 #include "../Sexy.TodLib/Reanimator.h"
 #include "../Sexy.TodLib/Attachment.h"
+#ifdef PVZ_BOT_BUILD
+#include "../Bot/BotConfig.h"
+#endif
 #include "Widget/AchievementsScreen.h"
 
 Coin::Coin()
@@ -748,6 +751,18 @@ void Coin::Update()
     {
         return;
     }
+
+#ifdef PVZ_BOT_BUILD
+    // Bot mode: sun is auto-collected the instant it would become collectable
+    // (the bot never clicks). Credit it and remove the coin immediately. See
+    // design doc §3.7. The real-time viewer (M6) will keep a brief visual.
+    if (pvzbot::gBotAutoCollectSun && mBoard != nullptr && IsSun() && !mDead && !mIsBeingCollected)
+    {
+        mBoard->AddSunMoney(GetSunValue());
+        Die();
+        return;
+    }
+#endif
 
     if (mFadeCount != 0)
     {

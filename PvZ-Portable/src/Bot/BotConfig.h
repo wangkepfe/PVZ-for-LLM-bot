@@ -25,6 +25,11 @@
 // LawnApp.h. Implemented in BotInit.cpp; only present when PVZ_BOT_BUILD is on.
 namespace pvzbot
 {
+	// When true, Coin::Update() auto-collects sun the moment it would become
+	// collectable (the bot never clicks sun). Set by the bot entry point;
+	// stays false for any non-bot code path. See design doc §3.7.
+	extern bool gBotAutoCollectSun;
+
 	// Returns true if the bot-engine wants to take over from LawnApp's normal
 	// title-screen-and-menu flow. Called from main.cpp right after argument
 	// parsing. When it returns true, LawnApp's regular Start() is skipped and

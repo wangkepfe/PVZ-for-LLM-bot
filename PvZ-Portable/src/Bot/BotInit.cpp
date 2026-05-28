@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <vector>
 
 #ifdef PVZ_BOT_BUILD
 
@@ -29,6 +30,9 @@ extern bool gIsPartnerBuild;
 
 namespace pvzbot
 {
+
+// Definition of the engine-visible flag declared in BotConfig.h.
+bool gBotAutoCollectSun = false;
 
 bool ShouldTakeOverMain(int argc, char** argv)
 {
@@ -110,42 +114,55 @@ int RunBotMain(int argc, char** argv)
 			"[pvzbot] board up. sun=%d  packets=%d  scene=%d\n",
 			b->mSunMoney, b->mSeedBank->mNumPackets, (int)app->mGameScene);
 
-		// DEBUG (pre-action-API): plant peashooters in column 2 of every row
-		// plus a couple of sunflowers, to exercise the combat code paths
-		// (plant update, projectile spawn/flight, zombie damage/death) headless.
-		// AddPlant is the low-level create; it doesn't charge sun.
+		// Baseline greedy policy (placeholder until the Python bot in M5):
+		// a fixed target layout — sunflowers in the back two columns for
+		// economy, attackers in the middle, a wall-nut up front per row. Each
+		// action tick we attempt the whole plan in order; TryPlant validates
+		// deck membership / cooldown / sun / placement, so the layout fills in
+		// over time as sun and cooldowns allow. Sun is auto-collected.
+		struct Placement { SeedType seed; int row; int col; };
+		std::vector<Placement> aPlan;
 		for (int row = 0; row < 5; ++row)
-			b->AddPlant(2, row, SeedType::SEED_PEASHOOTER);
-		b->AddPlant(0, 1, SeedType::SEED_SUNFLOWER);
-		b->AddPlant(0, 3, SeedType::SEED_SUNFLOWER);
-		std::fprintf(stderr, "[pvzbot] planted debug peashooters+sunflowers. plants=%d\n",
-			b->mPlants.mSize);
-
-		// Tick up to ~300 seconds of game time (~2 flags), reporting every 20s
-		// or until the level ends. Track the zombie high-water mark so we can
-		// see deaths (count dropping) vs. pure accumulation.
-		const int kSecondsToRun = 300;
-		int aMaxZombies = 0;
-		for (int sec = 0; sec < kSecondsToRun && !aBoard.IsGameOver(); ++sec)
 		{
-			aBoard.Tick(100);
-			b = aBoard.GetBoard();
-			if (b->mZombies.mSize > aMaxZombies)
-				aMaxZombies = b->mZombies.mSize;
-			if ((sec % 20) == 19)
+			aPlan.push_back({ SeedType::SEED_SUNFLOWER,  row, 0 });
+			aPlan.push_back({ SeedType::SEED_SUNFLOWER,  row, 1 });
+			aPlan.push_back({ SeedType::SEED_PEASHOOTER, row, 2 });
+			aPlan.push_back({ SeedType::SEED_REPEATER,   row, 3 });
+			aPlan.push_back({ SeedType::SEED_SNOWPEA,    row, 4 });
+			aPlan.push_back({ SeedType::SEED_WALLNUT,    row, 7 });
+		}
+
+		const long long kMaxTicks = 600LL * 100;   // up to 10 minutes game time
+		int aPlanted = 0;
+		while (aBoard.TickCount() < kMaxTicks && !aBoard.IsGameOver())
+		{
+			// Act 10x/second.
+			if ((aBoard.TickCount() % 10) == 0)
 			{
+				for (const Placement& p : aPlan)
+				{
+					if (aBoard.TryPlant(p.seed, p.row, p.col).accepted)
+						aPlanted++;
+				}
+			}
+			aBoard.Tick(1);
+
+			if ((aBoard.TickCount() % 2000) == 0)   // report every 20s
+			{
+				b = aBoard.GetBoard();
 				std::fprintf(stderr,
-					"[pvzbot] t=%4llds  sun=%-5d wave=%-3d zombies=%-3d (max %d) plants=%-3d projectiles=%-3d\n",
+					"[pvzbot] t=%4llds  sun=%-5d wave=%-3d flags=%d zombies=%-3d plants=%-3d planted=%d\n",
 					(long long)(aBoard.TickCount() / 100),
-					b->mSunMoney, b->mCurrentWave,
-					b->mZombies.mSize, aMaxZombies, b->mPlants.mSize, b->mProjectiles.mSize);
+					b->mSunMoney, b->mCurrentWave, b->GetSurvivalFlagsCompleted(),
+					b->mZombies.mSize, b->mPlants.mSize, aPlanted);
 			}
 		}
 
 		std::fprintf(stderr,
-			"[pvzbot] done. ticks=%lld  gameOver=%d  boardResult=%d  scene=%d\n",
-			aBoard.TickCount(), (int)aBoard.IsGameOver(),
-			(int)app->mBoardResult, (int)app->mGameScene);
+			"[pvzbot] done. ticks=%lld (%llds)  flags=%d  gameOver=%d  boardResult=%d\n",
+			aBoard.TickCount(), (long long)(aBoard.TickCount() / 100),
+			aBoard.GetBoard()->GetSurvivalFlagsCompleted(),
+			(int)aBoard.IsGameOver(), (int)app->mBoardResult);
 	}
 	catch (const std::exception& e)
 	{

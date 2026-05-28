@@ -15,11 +15,21 @@
 
 #ifdef PVZ_BOT_BUILD
 
+#include "../ConstEnums.h"   // SeedType
+
 class LawnApp;
 class Board;
 
 namespace pvzbot
 {
+
+// Result of a semantic action. `reason` is a stable short string ("ok",
+// "not_enough_sun", "card_on_cooldown", "occupied", ...). See design §4.2.
+struct ActionResult
+{
+	bool			accepted;
+	const char*		reason;
+};
 
 class AutoBoard
 {
@@ -36,6 +46,19 @@ public:
 
 	// True once the level has ended (zombies won, or board result set).
 	bool			IsGameOver() const;
+
+	// ---- Semantic actions (instant-effect, validated). row 0-4, col 0-8. ----
+	// plant: validates deck membership, cooldown, sun cost, and placement;
+	// on success deducts sun, places the plant, and starts the card cooldown.
+	ActionResult	TryPlant(SeedType theSeed, int theRow, int theCol);
+	// shovel: removes the top plant at (row,col).
+	ActionResult	TryShovel(int theRow, int theCol);
+
+	// ---- Lightweight queries (full Observation comes in M4) ----
+	int				Sun() const;
+	int				FindPacketIndex(SeedType theSeed) const;  // -1 if absent
+	bool			IsCardReady(SeedType theSeed) const;
+	int				CardCooldownTicksRemaining(SeedType theSeed) const;
 
 	LawnApp*		App() const { return mApp; }
 	Board*			GetBoard() const;
