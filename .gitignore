@@ -1,0 +1,57 @@
+# ============================================================
+#  COPYRIGHTED GAME ASSETS — NEVER COMMIT
+#  PopCap/EA-owned data from a legally purchased PvZ GOTY copy.
+#  These must stay out of the repo for copyright reasons.
+# ============================================================
+/Plants.vs.Zombies.GOTY.Edition.v1.2.0.1096/
+Plants.vs.Zombies.GOTY*/
+PlantsVsZombies*/
+*.pak
+**/main.pak
+**/PlantsVsZombies.exe
+
+# ============================================================
+#  Build output
+# ============================================================
+build/
+build-*/
+**/build/
+**/build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# ============================================================
+#  Engine-generated caches, savedata, logs
+# ============================================================
+compiled/
+**/compiled/
+cache32/
+cache64/
+userdata/
+*.log
+*.regemu
+*.v4
+*.dat
+
+# ============================================================
+#  Bot-engine run logs (per-session JSONL)
+# ============================================================
+bot-engine/runs/
+
+# ============================================================
+#  OS / editor junk
+# ============================================================
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
+.idea/
+*.tmp
+*~
