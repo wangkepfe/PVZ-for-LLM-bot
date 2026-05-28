@@ -19,6 +19,11 @@
 #include "LawnApp.h"
 #include "Resources.h"
 #include "Sexy.TodLib/TodStringFile.h"
+#include "Lawn/Board.h"
+#include "Lawn/SeedPacket.h"
+#include "Lawn/System/ProfileMgr.h"
+#include "Lawn/System/Music.h"
+#include "AutoBoard.h"
 
 extern bool gIsPartnerBuild;
 
@@ -42,67 +47,117 @@ bool ShouldTakeOverMain(int argc, char** argv)
 #endif
 }
 
-namespace
-{
-
-void LogFlag(const char* name, bool value)
-{
-	std::fprintf(stderr, "    %-24s = %s\n", name, value ? "true" : "false");
-}
-
-}  // namespace
-
 int RunBotMain(int argc, char** argv)
 {
-	std::fprintf(stderr, "[pvzbot] M1 spike: bringing up LawnApp under headless stubs.\n");
+	std::fprintf(stderr, "[pvzbot] M2: headless Day Endless tick test.\n");
 #ifdef PVZ_HEADLESS
 	std::fprintf(stderr, "[pvzbot] PVZ_HEADLESS=1 (no window, no GL context)\n");
 #endif
 
-	// Hand main.cpp's pre-Init setup work to us: in main.cpp these are run
-	// before our dispatch, so here we just need to construct the app.
 	::LawnApp* app = new ::LawnApp();
+	// The engine relies on the global gLawnApp (GameObject's constructor reads
+	// gLawnApp->mBoard, etc.). main.cpp sets this on the normal path; we must
+	// too since we took over before that line ran.
+	gLawnApp = app;
 	app->SetArgs(argc, argv);
 
-	std::fprintf(stderr, "[pvzbot] LawnApp constructed. Calling Init()...\n");
-
-	int initStage = 0;
-	const char* initStageName = "construction";
 	try
 	{
-		initStage = 1; initStageName = "LawnApp::Init";
 		app->Init();
-		initStage = 2; initStageName = "post-Init";
+		if (app->mShutdown || app->mLoadingFailed)
+		{
+			std::fprintf(stderr, "[pvzbot] Init failed (shutdown=%d loadingFailed=%d). "
+				"Did you pass -resdir=<path to main.pak folder>?\n",
+				app->mShutdown, app->mLoadingFailed);
+			return 1;
+		}
+
+		// Headless has no audio device. Music::PlayMusic() early-outs on this
+		// flag (the music path otherwise crashes inside SDL_mixer). Sound
+		// effects route through SDLSoundManager which no-ops when the mixer
+		// isn't initialised.
+		if (app->mMusic != nullptr)
+			app->mMusic->mMusicDisabled = true;
+
+		// A player profile is normally created via the NewUserDialog on first
+		// run; we skipped that UI. Board::GetLevelRandSeed() and others deref
+		// mPlayerInfo, so ensure one exists.
+		if (app->mPlayerInfo == nullptr)
+		{
+			app->mPlayerInfo = app->mProfileMgr->GetAnyProfile();
+			if (app->mPlayerInfo == nullptr)
+				app->mPlayerInfo = app->mProfileMgr->AddProfile("Bot");
+			std::fprintf(stderr, "[pvzbot] player profile = %p\n", (void*)app->mPlayerInfo);
+		}
+
+		// Start() would drop into the SDL main loop + loader screen. Instead we
+		// run the resource-loading pass synchronously ourselves, then take the
+		// board over directly.
+		std::fprintf(stderr, "[pvzbot] loading resources (synchronous LoadingThreadProc)...\n");
+		app->LoadingThreadProc();
+		if (app->mShutdown || app->mLoadingFailed)
+		{
+			std::fprintf(stderr, "[pvzbot] resource load failed.\n");
+			return 1;
+		}
+
+		std::fprintf(stderr, "[pvzbot] bootstrapping Day Endless board...\n");
+		AutoBoard aBoard(app);
+		aBoard.Bootstrap();
+
+		Board* b = aBoard.GetBoard();
+		std::fprintf(stderr,
+			"[pvzbot] board up. sun=%d  packets=%d  scene=%d\n",
+			b->mSunMoney, b->mSeedBank->mNumPackets, (int)app->mGameScene);
+
+		// DEBUG (pre-action-API): plant peashooters in column 2 of every row
+		// plus a couple of sunflowers, to exercise the combat code paths
+		// (plant update, projectile spawn/flight, zombie damage/death) headless.
+		// AddPlant is the low-level create; it doesn't charge sun.
+		for (int row = 0; row < 5; ++row)
+			b->AddPlant(2, row, SeedType::SEED_PEASHOOTER);
+		b->AddPlant(0, 1, SeedType::SEED_SUNFLOWER);
+		b->AddPlant(0, 3, SeedType::SEED_SUNFLOWER);
+		std::fprintf(stderr, "[pvzbot] planted debug peashooters+sunflowers. plants=%d\n",
+			b->mPlants.mSize);
+
+		// Tick up to ~300 seconds of game time (~2 flags), reporting every 20s
+		// or until the level ends. Track the zombie high-water mark so we can
+		// see deaths (count dropping) vs. pure accumulation.
+		const int kSecondsToRun = 300;
+		int aMaxZombies = 0;
+		for (int sec = 0; sec < kSecondsToRun && !aBoard.IsGameOver(); ++sec)
+		{
+			aBoard.Tick(100);
+			b = aBoard.GetBoard();
+			if (b->mZombies.mSize > aMaxZombies)
+				aMaxZombies = b->mZombies.mSize;
+			if ((sec % 20) == 19)
+			{
+				std::fprintf(stderr,
+					"[pvzbot] t=%4llds  sun=%-5d wave=%-3d zombies=%-3d (max %d) plants=%-3d projectiles=%-3d\n",
+					(long long)(aBoard.TickCount() / 100),
+					b->mSunMoney, b->mCurrentWave,
+					b->mZombies.mSize, aMaxZombies, b->mPlants.mSize, b->mProjectiles.mSize);
+			}
+		}
+
+		std::fprintf(stderr,
+			"[pvzbot] done. ticks=%lld  gameOver=%d  boardResult=%d  scene=%d\n",
+			aBoard.TickCount(), (int)aBoard.IsGameOver(),
+			(int)app->mBoardResult, (int)app->mGameScene);
 	}
 	catch (const std::exception& e)
 	{
-		std::fprintf(stderr,
-			"[pvzbot] EXCEPTION during %s: %s\n", initStageName, e.what());
+		std::fprintf(stderr, "[pvzbot] EXCEPTION: %s\n", e.what());
 		return 2;
 	}
 	catch (...)
 	{
-		std::fprintf(stderr,
-			"[pvzbot] EXCEPTION (non-std) during %s\n", initStageName);
+		std::fprintf(stderr, "[pvzbot] EXCEPTION (non-std)\n");
 		return 3;
 	}
 
-	std::fprintf(stderr, "[pvzbot] Init() returned. App state:\n");
-	LogFlag("mShutdown",       app->mShutdown);
-	LogFlag("mLoadingFailed",  app->mLoadingFailed);
-	LogFlag("mCloseRequest",   app->mCloseRequest);
-	LogFlag("mLoaded",         app->mLoaded);
-	std::fprintf(stderr, "    %-24s = %p\n", "app->mBoard",   (void*)app->mBoard);
-	std::fprintf(stderr, "    %-24s = %p\n", "app->mWindow",  app->mWindow);
-	std::fprintf(stderr, "    %-24s = %p\n", "app->mContext", app->mContext);
-	std::fprintf(stderr, "    %-24s = %p\n", "app->mGLInterface", (void*)app->mGLInterface);
-
-	// Don't call Start() yet — Start() drops into SexyAppBase's main event
-	// loop, which we don't want until M2's AutoBoard takes the wheel.
-	std::fprintf(stderr, "[pvzbot] M1 spike complete; not calling Start(). Exiting.\n");
-
-	// Don't try to Shutdown either: that touches subsystems we likely failed
-	// to initialise. Leaking the LawnApp on a one-shot exit is fine.
 	return 0;
 }
 
