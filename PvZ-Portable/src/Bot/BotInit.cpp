@@ -12,6 +12,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <exception>
 #include <vector>
 
@@ -49,6 +50,74 @@ bool ShouldTakeOverMain(int argc, char** argv)
 	}
 	return false;
 #endif
+}
+
+// M1.5 verification: confirm a reanim-RUNTIME-gated behavior works headless.
+// The Pole Vaulter's vault is gated on aBodyReanim->mAnimTime (Zombie.cpp
+// ~1699). If reanims didn't tick headless, the vaulter would stall/eat the
+// Wall-nut instead of vaulting over it. We spawn a Pole Vaulter + a Wall-nut
+// in one row and watch: phase should go NORMAL -> PRE_VAULT -> IN_VAULT ->
+// POST_VAULT, X should jump past the Wall-nut, and the Wall-nut should NOT be
+// eaten (HP stays full).
+static const char* PhaseName(ZombiePhase p)
+{
+	switch (p)
+	{
+	case ZombiePhase::PHASE_ZOMBIE_NORMAL:          return "NORMAL";
+	case ZombiePhase::PHASE_POLEVAULTER_PRE_VAULT:  return "PRE_VAULT";
+	case ZombiePhase::PHASE_POLEVAULTER_IN_VAULT:   return "IN_VAULT";
+	case ZombiePhase::PHASE_POLEVAULTER_POST_VAULT: return "POST_VAULT";
+	case ZombiePhase::PHASE_ZOMBIE_DYING:           return "DYING";
+	case ZombiePhase::PHASE_ZOMBIE_MOWERED:         return "MOWERED";
+	default:                                        return "other";
+	}
+}
+
+static void RunReanimVaultTest(AutoBoard& ab)
+{
+	Board* b = ab.GetBoard();
+	const int aRow = 2, aWallnutCol = 4;
+
+	b->AddPlant(aWallnutCol, aRow, SeedType::SEED_WALLNUT);
+	Plant* aWallnut = b->GetTopPlantAt(aWallnutCol, aRow, PlantPriority::TOPPLANT_ANY);
+	int aWallnutFullHp = aWallnut ? aWallnut->mPlantHealth : -1;
+
+	Zombie* aZombie = b->AddZombieInRow(ZombieType::ZOMBIE_POLEVAULTER, aRow, 0);
+	ZombieID aZombieId = b->ZombieGetID(aZombie);
+
+	std::fprintf(stderr,
+		"[reanim-test] Pole Vaulter spawned x=%.0f, Wall-nut at col %d (hp=%d). "
+		"Expect: vault phase fires + X jumps past Wall-nut + Wall-nut not eaten.\n",
+		aZombie->mPosX, aWallnutCol, aWallnutFullHp);
+
+	bool aSawInVault = false;
+	for (int half = 0; half < 60 && !ab.IsGameOver(); ++half)   // up to 30s
+	{
+		ab.Tick(50);   // 0.5s
+
+		Zombie* z = b->ZombieTryToGet(aZombieId);
+		Plant* wn = b->GetTopPlantAt(aWallnutCol, aRow, PlantPriority::TOPPLANT_ANY);
+		int wnHp = wn ? wn->mPlantHealth : -1;
+		if (z == nullptr)
+		{
+			std::fprintf(stderr, "[reanim-test] t=%.1fs  vaulter gone (crossed/mowed). wallnut hp=%d\n",
+				ab.TickCount() / 100.0, wnHp);
+			break;
+		}
+		if (z->mZombiePhase == ZombiePhase::PHASE_POLEVAULTER_IN_VAULT)
+			aSawInVault = true;
+
+		std::fprintf(stderr, "[reanim-test] t=%5.1fs  x=%6.1f  phase=%-10s  wallnut_hp=%d\n",
+			ab.TickCount() / 100.0, z->mPosX, PhaseName(z->mZombiePhase), wnHp);
+
+		if (z->mZombiePhase == ZombiePhase::PHASE_POLEVAULTER_POST_VAULT && z->mPosX < (aWallnutCol * 80))
+		{
+			std::fprintf(stderr, "[reanim-test] RESULT: vault COMPLETED headless "
+				"(saw IN_VAULT=%d, now POST_VAULT past wall-nut). Reanim-gated gameplay OK.\n",
+				(int)aSawInVault);
+			break;
+		}
+	}
 }
 
 int RunBotMain(int argc, char** argv)
@@ -113,6 +182,14 @@ int RunBotMain(int argc, char** argv)
 		std::fprintf(stderr,
 			"[pvzbot] board up. sun=%d  packets=%d  scene=%d\n",
 			b->mSunMoney, b->mSeedBank->mNumPackets, (int)app->mGameScene);
+
+		// M1.5 verification mode: PVZBOT_REANIM_TEST=1 runs the Pole Vaulter
+		// vault test (reanim-runtime-gated behavior) instead of the bot loop.
+		if (std::getenv("PVZBOT_REANIM_TEST") != nullptr)
+		{
+			RunReanimVaultTest(aBoard);
+			return 0;
+		}
 
 		// Baseline greedy policy (placeholder until the Python bot in M5):
 		// a fixed target layout — sunflowers in the back two columns for

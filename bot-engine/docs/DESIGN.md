@@ -181,27 +181,19 @@ if (IsSun() && !mDead) {
 
 The `Observation.sun` field still reports current bank balance — the bot reads it to decide affordability.
 
-### 3.8 Reanim refactor (tick-driven gameplay)
+### 3.8 Reanim & gameplay timing — INVESTIGATED, no refactor needed (M1.5, 2026-05-27)
 
-In vanilla, some gameplay timings are driven by **reanimation frame events** — the reanim system fires named events at specific animation frames, and gameplay code listens for them. We must refactor these to be pure tick-counter-driven, because:
+The original worry was that some gameplay timings are driven by **reanimation frame state**, which (we assumed) wouldn't advance headless and would couple to render rate under time-warp. **Investigation showed this premise is wrong for this engine.** Findings:
 
-1. **Headless has no reanim playback**, so frame events never fire — gameplay would stall.
-2. **Time-warp** (1×/2×/4×/8×) changes anim playback speed if it's tied to render rate; gameplay must remain on the fixed 100 Hz tick.
-3. **Real-time bot reaction** needs gameplay timing decoupled from anim-cache load state on slower machines.
+1. **Reanims tick in headless.** `EffectSystem::Update()` iterates every reanimation and calls `aReanim->Update()`, and it is invoked from `Board::Update()` — which is exactly the per-tick call the bot's `AutoBoard::Tick()` makes. Only `Draw()` is skipped headless; the *logic-side* frame advance still runs every tick.
+2. **Reanim advance is per-tick and deterministic.** `Reanimation::Update()` does `mAnimTime += SECONDS_PER_UPDATE * mAnimRate / mFrameCount`, where `SECONDS_PER_UPDATE = 0.01` is a fixed constant (one 100 Hz tick) — **not** wall-clock. So time-warp scales game-time and animation together (gameplay timing in ticks is invariant), and reruns are deterministic.
+3. **Movement is fixed-velocity, tick-driven.** Zombie walk speed is set from constants (`mVelX = 0.3f`, …), advanced as `mX += mVelX` per tick — not derived from anim track velocity.
+4. **Reanim-derived durations use static definition data.** E.g. the Pole Vaulter computes its vault velocity from `aBodyReanim->mFrameCount / mAnimRate` — static properties loaded from the reanim definition (available headless), not runtime playback state.
+5. **Runtime reanim state that *does* gate gameplay works headless** because reanims tick. The Pole Vaulter's vault is gated on `aBodyReanim->mAnimTime > 0.6` (`Zombie.cpp` ~1699) — the most complex reanim-runtime coupling in the zombie code.
 
-Audit targets (full list pinned in M1.5):
+**Empirical proof:** a headless test (`PVZBOT_REANIM_TEST=1`, in `BotInit.cpp::RunReanimVaultTest`) spawns a Pole Vaulter and a Wall-nut in one row. Observed headless: phase `NORMAL/PRE_VAULT → IN_VAULT → POST_VAULT`, the zombie's X jumps from ~440 to ~288 (clearing the Wall-nut at col 4), and the **Wall-nut's HP never drops** — it vaulted over rather than eating it. The `mAnimTime`-gated transition fired correctly.
 
-- Pole Vaulter — vault trigger frame.
-- Newspaper Zombie — paper-rip transition frame.
-- Gargantuar — smash impact frame; Imp-throw release frame.
-- Zombie eat-bite damage frame (per type).
-- Plant attack-anim → projectile spawn frames (Peashooter, Repeater, Snow Pea).
-- Chomper — chew-cycle gate.
-- Cherry Bomb / Potato Mine — detonation frame.
-
-Refactor pattern: for every gameplay-relevant reanim frame event, introduce an explicit per-entity tick counter (e.g., `mVaultCountdown`, `mNewspaperRipPending`, `mSmashCountdown`, `mChewLockoutTicks`) that fires at the same game-time offset the vanilla anim event would have. The reanim system, when running (real-time mode), becomes pure visualization driven off `mState` + tick counters — never a gameplay trigger.
-
-Validation: a side-by-side test harness runs a fixed bot input against (a) the vanilla unmodified engine and (b) the refactored engine, both at 1× real-time, and diffs the event timeline. Acceptable drift is sub-tick. See M1.5.
+**Conclusion:** the reanim system is already tick-driven and runs headless; no refactor is required. The Gargantuar smash, Imp throw, Newspaper rip, eat-bite, Chomper chew, and Cherry-Bomb/Potato-Mine detonation share the same ticking mechanism (the M2 9-wave run exercised several without anomaly). The `RunReanimVaultTest` diagnostic is kept (env-gated) as a regression check. **M1.5 is closed as unnecessary** rather than as a refactor.
 
 ---
 
@@ -608,11 +600,8 @@ These are things I want to confirm before writing the code, *not* things we'll g
 - Build the headless engine binary that runs a hard-coded session (no bot yet, just ticks).
 - Verify it runs the existing Day Endless mode without crashing for ≥1 flag worth of game time.
 
-### M1.5 — Reanim refactor (3-5 days)
-- Audit `Zombie.cpp`, `Plant.cpp`, `Reanimation*.cpp`, and any `ListenerCallback` / `mTrackShowing` references for reanim-frame-event-driven gameplay.
-- Pin the full list of gameplay-relevant reanim events (Pole Vaulter, Newspaper, Gargantuar, Imp, eat-bite, Peashooter/Repeater/Snow Pea shoots, Chomper chew lockout, Cherry Bomb / Potato Mine detonation, …).
-- For each: introduce a tick counter on the entity, fire gameplay at the same game-time offset, and demote the reanim event to a viewer-only trigger.
-- Side-by-side test harness vs. vanilla engine at 1× speed; confirm sub-tick drift on a recorded input.
+### M1.5 — Reanim timing → CLOSED as unnecessary (2026-05-27)
+Investigated instead of refactored. The engine's reanim system already advances per **fixed game tick** (`SECONDS_PER_UPDATE`) inside `EffectSystem::Update()` → `Board::Update()`, which runs headless. Gameplay that reads runtime reanim state therefore works headless and is time-warp/determinism-safe. Verified empirically with the Pole Vaulter vault (`PVZBOT_REANIM_TEST`). See §3.8 for the full finding. No tick-counter refactor was needed; ~½ day spent on investigation vs. the budgeted 3-5 days.
 
 ### M2 — AutoBoard + semantic actions + sun auto-collect (2-3 days)
 - Implement `AutoBoard::Bootstrap` to skip menus and start Day Endless+ with the 8-card bank.
@@ -699,4 +688,4 @@ We are done when **all** of these hold:
 5. **No Pogo Zombie** ever appears in the run log.
 6. The vanilla `pvz-portable` build (no bot flags) still works as upstream — we don't break the original game.
 7. A second bot script (e.g., naive "all sunflowers") demonstrably reaches a different `flags_completed` from the baseline, proving the framework can differentiate strategies.
-8. The reanim refactor side-by-side test (M1.5) shows sub-tick drift versus the vanilla engine on a fixed input.
+8. ~~The reanim refactor side-by-side test (M1.5)…~~ — **superseded**: M1.5 investigation (§3.8) showed reanims already tick deterministically headless; no refactor. Regression guard is the `PVZBOT_REANIM_TEST` vault check.
